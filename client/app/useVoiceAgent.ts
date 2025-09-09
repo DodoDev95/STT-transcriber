@@ -41,6 +41,7 @@ export default function useVoiceAgent(
               } else if (msg.type === "partial") {
                 setPartial(msg.text ?? "");
               } else if (msg.type === "final") {
+                console.log("transcription", msg);
                 const t = (msg.text ?? "").trim();
                 if (t) setTranscript((prev) => (prev ? prev + " " + t : t));
                 setPartial("");
