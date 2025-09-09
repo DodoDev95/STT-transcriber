@@ -1,13 +1,13 @@
-// AudioWorklet that downsamples to 16 kHz, frames 20 ms, and posts Int16 frames
+// public/worklets/pcm-16k-processor.js
 class PCM16kProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
     this.targetRate = 16000;
-    this.step = sampleRate / this.targetRate; // input samples per 16k output sample
-    this.t = 0; // phase accumulator in input-sample units
+    this.step = sampleRate / this.targetRate; // e.g. 48000 / 16000 = 3
+    this.t = 0;
 
-    // simple circular buffer for resampled float32
-    this.buf = new Float32Array(16000 * 2); // 2 seconds of 16k audio
+    // ring buffer for resampled Float32
+    this.buf = new Float32Array(16000 * 2);
     this.read = 0;
     this.write = 0;
     this.len = this.buf.length;
@@ -17,37 +17,37 @@ class PCM16kProcessor extends AudioWorkletProcessor {
       if (e.data?.type === "reset") {
         this.t = 0;
         this.read = this.write = 0;
+      } else if (e.data?.type === "flush") {
+        this.flush();
       }
-      if (e.data?.type === "flush") this.flush();
     };
+
+    // prove the worklet loaded
+    this.port.postMessage({ type: "ready", sr: sampleRate });
   }
 
-  // how many samples currently buffered
   available() {
     return this.write >= this.read
       ? this.write - this.read
       : this.len - (this.read - this.write);
   }
 
-  // push one sample into ring buffer
   pushSample(s) {
     this.buf[this.write] = s;
     this.write = (this.write + 1) % this.len;
-    // overrun protection: move read forward if we ever overlap
-    if (this.write === this.read) this.read = (this.read + 160) % this.len; // drop ~10 ms
+    if (this.write === this.read) this.read = (this.read + 160) % this.len; // drop ~10 ms on overrun
   }
 
   emitFrames() {
-    const FRAME = 320; // 20 ms @ 16k
+    const FRAME = 320; // 20 ms @ 16 kHz
     while (this.available() >= FRAME) {
       const i16 = new Int16Array(FRAME);
       for (let i = 0; i < FRAME; i++) {
         const s = this.buf[this.read];
         this.read = (this.read + 1) % this.len;
         const c = Math.max(-1, Math.min(1, s));
-        i16[i] = c < 0 ? c * 0x8000 : c * 0x7fff; // −32768..+32767
+        i16[i] = c < 0 ? (c * 0x8000) | 0 : (c * 0x7fff) | 0;
       }
-      // transfer the underlying buffer to main thread (zero copy)
       this.port.postMessage(
         { type: "pcm", seq: this.seq++, buffer: i16.buffer },
         [i16.buffer]
@@ -56,34 +56,32 @@ class PCM16kProcessor extends AudioWorkletProcessor {
   }
 
   flush() {
-    // optionally pad leftover to a full frame (not strictly required for STT)
     this.emitFrames();
   }
 
   process(inputs) {
-    const input = inputs[0];
-    if (!input || input.length === 0) return true;
-    const ch0 = input[0]; // Float32Array of 128 frames at the device sampleRate
-    if (!ch0) return true;
+    // inputs => [ [ Float32Array (ch0), Float32Array (ch1), ... ] ]
+    const chs = inputs[0];
+    if (!chs || chs.length === 0) return true;
+    const data = chs[0]; // Float32Array for channel 0
+    if (!data || data.length === 0) return true;
 
-    // linear-resample from device rate -> 16 kHz using phase accumulator
-    let t = this.t; // current position in input-sample units
-    const step = this.step; // input samples / 16k output sample
-    const N = ch0.length;
+    // linear resample deviceRate → 16k using phase accumulator
+    let t = this.t;
+    const step = this.step;
+    const N = data.length;
 
     while (t < N) {
-      const i = Math.floor(t);
+      const i = t | 0;
       const frac = t - i;
-      const x0 = ch0[i] || 0;
-      const x1 = ch0[i + 1] || x0;
-      const y = x0 + (x1 - x0) * frac; // interpolated sample at time t
-      this.pushSample(y);
+      const x0 = data[i] || 0;
+      const x1 = data[i + 1] || x0;
+      this.pushSample(x0 + (x1 - x0) * frac);
       t += step;
     }
-
-    this.t = t - N; // carry remainder into next render quantum
+    this.t = t - N;
     this.emitFrames();
-    return true; // keep processor alive
+    return true;
   }
 }
 
