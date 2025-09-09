@@ -26,6 +26,7 @@ COMPUTE_TYPE = "float16"  # "float16" for GPU, "int8" for CPU
 # Silence / energy gate (prevents hallucinations while quiet)
 SILENCE_DBFS_GATE = -45.0  # typical good range: -50..-40 dBFS
 MIN_SILENCE_SEC = 1.2  # after this long of silence, drop the buffer
+FINAL_SILENCE_SEC = 0.8  # when silence lasts this long, emit "final"
 
 # Optional: periodic decode while audio is flowing; guarded by energy gate
 FORCE_DECODE_SEC = 1.0
@@ -133,19 +134,51 @@ async def ws_stt(ws: WebSocket):
 
                 # Snapshot sliding window
                 window = np.concatenate(list(buf))
+
                 # Energy gate
                 if not should_decode(window):
+                    now = asyncio.get_event_loop().time()
                     if silence_started_at is None:
-                        silence_started_at = asyncio.get_event_loop().time()
-                    if (
-                        asyncio.get_event_loop().time() - silence_started_at
-                        > MIN_SILENCE_SEC
-                    ):
+                        silence_started_at = now
+                    sil = now - silence_started_at
+
+                    # === NEW: emit "final" on end-of-utterance (while still connected) ===
+                    if sil > FINAL_SILENCE_SEC and seen_text:
+                        try:
+                            segments, _ = model.transcribe(
+                                window,
+                                language="en",
+                                task="transcribe",
+                                vad_filter=True,
+                                vad_parameters=dict(
+                                    min_silence_duration_ms=500, speech_pad_ms=200
+                                ),
+                                beam_size=5,
+                                condition_on_previous_text=False,
+                                temperature=0.0,
+                                compression_ratio_threshold=2.4,
+                                log_prob_threshold=-1.0,
+                            )
+                            final_text = "".join(seg.text for seg in segments).strip()
+                            if final_text:
+                                await safe_send({"type": "final", "text": final_text})
+                        except Exception:
+                            log.exception("final-on-silence failed")
+
+                        # reset for next utterance
+                        clear_buffer()
+                        silence_started_at = None
+                        continue
+
+                    # Optional: if very long silence, just clear any stale audio
+                    if sil > MIN_SILENCE_SEC:
                         clear_buffer()
                     continue
                 else:
+                    # We have energy; reset silence timer
                     silence_started_at = None
 
+                # Decode for partials
                 try:
                     segments, _ = model.transcribe(
                         window,
@@ -239,7 +272,7 @@ async def ws_stt(ws: WebSocket):
         with contextlib.suppress(asyncio.CancelledError):
             await task
 
-        # If we still have audio in buffer, try one last decode
+        # Fallback: if we still have audio, try one last decode (may not send if closed)
         if buf:
             try:
                 window = np.concatenate(list(buf))
@@ -259,7 +292,7 @@ async def ws_stt(ws: WebSocket):
                         log_prob_threshold=-1.0,
                     )
                     final_text = "".join(seg.text for seg in segments).strip()
-                    print(final_text)
+                    print(final_text)  # for debugging
                     if final_text and ws.client_state == WebSocketState.CONNECTED:
                         await safe_send({"type": "final", "text": final_text})
             except Exception:

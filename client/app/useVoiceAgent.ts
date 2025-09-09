@@ -25,53 +25,44 @@ export default function useVoiceAgent(
         if (wsUrl && !wsRef.current) {
           const ws = new WebSocket(wsUrl);
           ws.binaryType = "arraybuffer";
-          ws.onopen = () => setStatus("ws connected, capturing → 16 kHz PCM");
+
+          ws.onopen = () => {
+            setStatus("ws connected, capturing → 16 kHz PCM");
+          };
 
           ws.onmessage = (evt) => {
-            // Some frames are JSON (meter/partial/final/info)
             try {
               const msg = JSON.parse(evt.data);
-              
 
               if (msg.type === "meter") {
-                setStatus(
-                  `📈 ${msg.rms_dbfs.toFixed(1)} dBFS (peak ${msg.peak_dbfs.toFixed(
-                    1
-                  )})  ${msg.seconds.toFixed(2)}s`
-                );
+                setStatus(`📈 ${msg.rms_dbfs.toFixed(1)} dBFS (peak ${msg.peak_dbfs.toFixed(1)})  ${msg.seconds.toFixed(2)}s`);
               } else if (msg.type === "info") {
-                console.log("info:", msg)
                 setStatus(`info: ${msg.message}`);
               } else if (msg.type === "partial") {
-                console.log("partial:", msg)
                 setPartial(msg.text ?? "");
               } else if (msg.type === "final") {
-                console.log("final:", msg)
                 const t = (msg.text ?? "").trim();
-                if (t) {
-                  setTranscript((prev) => (prev ? prev + " " + t : t));
-                }
-                setPartial(""); // clear live line
+                if (t) setTranscript((prev) => (prev ? prev + " " + t : t));
+                setPartial("");
               }
             } catch {
-              // Non-JSON (ignore)
+              // Non-JSON => ignore
             }
           };
 
           ws.onclose = () => setStatus("ws closed");
-          ws.onerror  = () => setStatus("ws error");
+          ws.onerror = () => setStatus("ws error");
           wsRef.current = ws;
         }
 
         // 2) Mic
         const stream = await navigator.mediaDevices.getUserMedia({
-  audio: {
-    echoCancellation: true,
-    noiseSuppression: true,
-    autoGainControl: false,   // ← turn OFF
-  },
-});
-        if (cancelled) { stream.getTracks().forEach((t) => t.stop()); return; }
+          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: false },
+        });
+        if (cancelled) {
+          stream.getTracks().forEach((t) => t.stop());
+          return;
+        }
         streamRef.current = stream;
 
         // 3) AudioContext + Worklet
@@ -104,13 +95,43 @@ export default function useVoiceAgent(
       }
     }
 
-    function stop() {
+    async function stop() {
+      // tell the worklet to flush its local ringbuffer (optional but fine)
       nodeRef.current?.port.postMessage({ type: "flush" });
+
+      // *** IMPORTANT: ask the server to finalize before we close ***
+      const ws = wsRef.current;
+      let gotFinal = false;
+
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        // temporary handler to detect final / flushed
+        const onMessage = (evt: MessageEvent) => {
+          try {
+            const msg = JSON.parse(evt.data);
+            if (msg.type === "final" || (msg.type === "info" && msg.message === "flushed")) {
+              gotFinal = true;
+            }
+          } catch {}
+        };
+        ws.addEventListener("message", onMessage);
+
+        // send flush command to server
+        ws.send(JSON.stringify({ type: "flush" }));
+
+        // wait up to 600ms for final (tune this)
+        await new Promise((resolve) => setTimeout(resolve, 600));
+
+        ws.removeEventListener("message", onMessage);
+      }
+
+      // tear down audio regardless
       nodeRef.current?.disconnect();
       srcRef.current?.disconnect();
       streamRef.current?.getTracks().forEach((t) => t.stop());
-      ctxRef.current?.close();
+      await ctxRef.current?.close().catch(() => {});
+      // close ws after giving it a chance to send final
       wsRef.current?.close();
+
       nodeRef.current = null;
       srcRef.current = null;
       streamRef.current = null;
@@ -122,11 +143,11 @@ export default function useVoiceAgent(
     }
 
     if (on) start();
-    else stop();
+    else void stop();
 
     return () => {
       cancelled = true;
-      if (on) stop();
+      if (on) void stop();
     };
   }, [on, wsUrl]);
 
