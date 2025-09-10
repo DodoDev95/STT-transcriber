@@ -1,4 +1,4 @@
-﻿# Real-Time Voice Transcription
+﻿# Real-Time Voice Transcription (EN only)
 
 This project is split into three main parts:
 
@@ -47,4 +47,5 @@ cd client
 npm install
 npm run dev
 ```
+
 
