@@ -8,6 +8,14 @@ This project is split into three main parts:
 
 ---
 
+## IMPORTANT
+The project is set to use the "cuda" model in the transcriber, which relies on GPU processing so you would have to install the NVIDIA CUDA toolkit and CUDNN.
+To use the CPU powered version of the model set the variables in /STT/app.py to:
+`
+model = WhisperModel("base", device="cpu", compute_type="int8")
+`
+This model is weaker and makes the transcriber less accurate when listening, but the audio parameters can still be toyed with to improve the "base" model
+
 ## Getting Started
 
 ### 1. Clone the repo
@@ -48,6 +56,7 @@ cd client
 npm install
 npm run dev
 ```
+
 
 
 
