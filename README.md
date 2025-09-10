@@ -1,4 +1,4 @@
-﻿# Real-Time Voice Transcription (EN only)
+﻿# Real-Time Voice Transcription
 
 This project is split into three main parts:
 
@@ -26,6 +26,7 @@ python -m venv .venv
 source .venv/bin/activate # On Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
+In the app.py file you can change the language of the model from "en" to whichever language you need
 
 ### Run STT server
 
@@ -47,5 +48,6 @@ cd client
 npm install
 npm run dev
 ```
+
 
 
